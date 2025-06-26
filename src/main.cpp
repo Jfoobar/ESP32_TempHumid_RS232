@@ -28,9 +28,10 @@ int lastEmailHour = -1; // Initialize to an invalid hour
 
 /* Declare the global used SMTPSession object for SMTP transport */
 SMTPSession smtp;
-
 /* Declare the global SMTP_Message object for email sending */
 SMTP_Message message;
+// SMTP_Result result; // To store the result of sending email
+bool smtpReady = false; 
 
 // Create an instance of the SHT31-D sensor object
 Adafruit_SHT31 sht31 = Adafruit_SHT31();
@@ -43,6 +44,10 @@ const int Serial2_RX_Pin = 16;
 const long BAUD_RATE = 9600; // Match this to your PuTTY setting
 
 void readAndReportSensor(const struct tm& timeinfo) {
+     if (!smtpReady) {
+        Serial.println("Skipping email: SMTP server is not connected.");
+        return; // Exit the function immediately
+    }
     float temperatureC = sht31.readTemperature();
     float humidity = sht31.readHumidity();
 
@@ -67,6 +72,7 @@ void readAndReportSensor(const struct tm& timeinfo) {
         if (!MailClient.sendMail(&smtp, &message)) {
             Serial.println("ERROR: Failed to send email.");
             Serial2.println("ERROR: Failed to send email.");
+            smtpReady = false; // Mark connection as stale/broken
         } else {
             Serial.println("Email sent successfully!");
             Serial2.println("Email sent successfully!");
@@ -152,50 +158,51 @@ if (WiFi.status() == WL_CONNECTED) {
     Serial.print("IP address: ");
     Serial.println(WiFi.localIP());
 
-    // Connect to SMTP server (as discussed previously)
-    Serial.println("Connecting to SMTP Server...");
-    if (!smtp.connect(&config)) {
-        Serial.println("ERROR: Failed to connect to SMTP server. Halting.");
-        while(1) delay(100); 
-    } else {
+    // 2. NOW, GET THE TIME. THIS MUST HAPPEN BEFORE SMTP CONNECT.
+      Serial.println("Configuring time from NTP server...");
+      configTzTime(timeZoneInfo, "pool.ntp.org", "time.nist.gov");
+      struct tm timeinfo;
+      unsigned long startSync = millis();
+      while (!getLocalTime(&timeinfo, 500) || timeinfo.tm_year < (2023 - 1900)) {
+          Serial.print(".");
+          if (millis() - startSync > 15000) {
+              Serial.println("\nERROR: Timeout waiting for NTP sync.");
+              break; 
+          }
+          delay(500);
+      }
+      
+      // If we got the time, set the timeSet flag
+      if (timeinfo.tm_year > (2023 - 1900)) {
+          Serial.println("\nSUCCESS: NTP has synced. System time is set.");
+          timeSet = true;
+      }
+
+      // 3. ONLY NOW, ATTEMPT TO CONNECT TO SMTP
+      //    (This requires time to be set correctly)
+      Serial.println("Connecting to SMTP Server...");
+      smtp.debug(1); // Enable debug
+      Session_Config config;
+      // ... fill in your config details ...
+      config.server.host_name = MAIL_SERVER;
+      config.server.port = MAIL_PORT;
+      config.login.email = MAIL_FROM;
+      config.login.password = MAIL_PASS;
+
+      if (!smtp.connect(&config)) {
+        Serial.println("ERROR: Failed to connect to SMTP server. Email sending will be disabled.");
+        smtpReady = false; // Set our flag to false
+        } else {
         Serial.println("SUCCESS: Connected to SMTP Server.");
-    }
+        smtpReady = true; // Set our flag to true
+    }   
 
-    Serial.println("Configuring time from NTP server...");
-    configTzTime(timeZoneInfo, "pool.ntp.org", "time.nist.gov");
+  } else {
+      Serial.println("\nWiFi connection failed. Continuing without WiFi.");
+  }
 
-    struct tm timeinfo;
-    unsigned long startSync = millis();
-    const unsigned long syncTimeout = 15000; // 15-second timeout
 
-    // Loop until we get a valid time. tm_year is years since 1900.
-    // A year less than 100 (i.e., year 2000) is a good sign it's not synced.
-    while (!getLocalTime(&timeinfo, 500) || timeinfo.tm_year < (2023 - 1900)) {
-        Serial.print(".");
-        if (millis() - startSync > syncTimeout) {
-            Serial.println("\nERROR: Timeout waiting for NTP sync.");
-            timeSet = false;
-            break; // Exit the while loop
-        }
-        delay(500);
-    }
-    
-    // Check if we successfully exited the loop
-    if (timeinfo.tm_year > (2023 - 1900)) {
-        Serial.println("\nSUCCESS: NTP has synced. System time is set.");
-        timeSet = true;
-        // Now, printing the time will show the correct, timezone-adjusted value.
-        char timeBuffer[30];
-        strftime(timeBuffer, sizeof(timeBuffer), "%A, %B %d %Y %H:%M:%S", &timeinfo);
-        Serial.print("Current California Time: ");
-        Serial.println(timeBuffer);
-    }
-
-} else {
-    Serial.println("\nWiFi connection failed. Continuing without WiFi...");
-}
-
-  Serial.println("--- ESP32 (Arduino IDE Monitor) ---");
+  Serial.println("--- ESP32 (IDE Monitor) ---");
   Serial.println("ESP32 Temperature and Humidity Sensor Ready (SHT31-D).");
   Serial.println("Type 'r' or 'R' in Serial Monitor to current get readings.");
 
