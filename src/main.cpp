@@ -30,7 +30,6 @@ int lastEmailHour = -1; // Initialize to an invalid hour
 SMTPSession smtp;
 /* Declare the global SMTP_Message object for email sending */
 SMTP_Message message;
-// SMTP_Result result; // To store the result of sending email
 bool smtpReady = false; 
 
 // Create an instance of the SHT31-D sensor object
