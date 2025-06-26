@@ -15,8 +15,8 @@ const char* ssid = WIFI_SSID;
 const char* password = WIFI_PASSWORD;
 const char* timeZoneInfo = "PST8PDT,M3.2.0,M11.1.0"; // Time zone for California (PDT)
 const char* MAIL_SERVER = "smtp.gmail.com";
-const char* MAIL_FROM = "ESDPetalumaCA@gmail.com";
-const char* MAIL_TO = "ESDPetalumaCA@gmail.com";
+const char* MAIL_FROM = "Email@gmail.com";
+const char* MAIL_TO = "Email@gmail.com";
 const char* MAIL_SUBJECT = "SHT31-D Sensor Readings";
 const char* MAIL_CONTENT = "Temperature and Humidity Readings from SHT31-D Sensor";
 const char* MAIL_USER = "ESDPetalumaCA@gmail.com";
@@ -74,6 +74,33 @@ void readAndReportSensor(const struct tm& timeinfo) {
         }
     }
 }
+void performSensorReadingAndPrint() {
+    float temperatureC = sht31.readTemperature();
+    float humidity = sht31.readHumidity();
+
+    if (isnan(temperatureC) || isnan(humidity)) {
+        Serial.println("ERROR: Failed to read from SHT31 sensor!");
+        Serial2.println("ERROR: Failed to read from SHT31 sensor!");
+        return;
+    }
+
+    float temperatureF = (temperatureC * 9 / 5) + 32;
+
+    Serial.printf("MANUAL READ -> Temp: %.2f F, Humidity: %.2f %%\n", temperatureF, humidity);
+    Serial2.printf("MANUAL READ -> Temp: %.2f F, Humidity: %.2f %%\n", temperatureF, humidity);
+    // Now check if we should also send an email
+    // This part WILL NOT WORK if WiFi is down, which is expected.
+    if (timeSet) {
+        struct tm timeinfo;
+        getLocalTime(&timeinfo);
+        // We can call your original function here to handle the email logic
+        readAndReportSensor(timeinfo); 
+    } else {
+        Serial.println("Cannot send email: WiFi is not connected or time is not set.");
+    }
+}
+
+
 
 void setup() {
   // --- Setup Function ---
@@ -82,16 +109,16 @@ void setup() {
 
   // Initialize Serial (UART0) for communication with the Arduino IDE Serial Monitor
   Serial.begin(BAUD_RATE); // Using the same baud rate for consistency
-  delay(100); // Small delay to allow serial port to initialize
+  delay(1000); // Small delay to allow serial port to initialize
   WiFi.begin(ssid, password);
 
   unsigned long startAttemptTime = millis();
-  const unsigned long wifiTimeout = 10000; // 10 seconds
+  const unsigned long wifiTimeout = 15000; // 15 seconds
 
-   struct tm timeinfo = {0};
-   time_t epochTime = mktime(&timeinfo);
-   struct timeval tv = { .tv_sec = epochTime };
-   settimeofday(&tv, NULL);
+  //  struct tm timeinfo = {0};
+  //  time_t epochTime = mktime(&timeinfo);
+  //  struct timeval tv = { .tv_sec = epochTime };
+  //  settimeofday(&tv, NULL);
    
   //Set the network reconnection option
   MailClient.networkReconnect(true);
@@ -118,28 +145,55 @@ void setup() {
       Serial.print(".");
   }
 
-  if (WiFi.status() == WL_CONNECTED) {
-      Serial.println("\nWiFi connected!");
-      Serial.print("IP address: ");
-      Serial.println(WiFi.localIP());
-      Serial.println("NTP time will be set using WiFi connection.");
-      configTzTime(timeZoneInfo, "pool.ntp.org");
-      struct tm timeinfo;
-      if (getLocalTime(&timeinfo)) {
-        Serial.println("SUCCESS: Setup NTP has synced. System time has been set.");
+// Inside setup(), after WiFi is connected...
+
+if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\nWiFi connected!");
+    Serial.print("IP address: ");
+    Serial.println(WiFi.localIP());
+
+    // Connect to SMTP server (as discussed previously)
+    Serial.println("Connecting to SMTP Server...");
+    if (!smtp.connect(&config)) {
+        Serial.println("ERROR: Failed to connect to SMTP server. Halting.");
+        while(1) delay(100); 
+    } else {
+        Serial.println("SUCCESS: Connected to SMTP Server.");
+    }
+
+    Serial.println("Configuring time from NTP server...");
+    configTzTime(timeZoneInfo, "pool.ntp.org", "time.nist.gov");
+
+    struct tm timeinfo;
+    unsigned long startSync = millis();
+    const unsigned long syncTimeout = 15000; // 15-second timeout
+
+    // Loop until we get a valid time. tm_year is years since 1900.
+    // A year less than 100 (i.e., year 2000) is a good sign it's not synced.
+    while (!getLocalTime(&timeinfo, 500) || timeinfo.tm_year < (2023 - 1900)) {
+        Serial.print(".");
+        if (millis() - startSync > syncTimeout) {
+            Serial.println("\nERROR: Timeout waiting for NTP sync.");
+            timeSet = false;
+            break; // Exit the while loop
+        }
+        delay(500);
+    }
+    
+    // Check if we successfully exited the loop
+    if (timeinfo.tm_year > (2023 - 1900)) {
+        Serial.println("\nSUCCESS: NTP has synced. System time is set.");
         timeSet = true;
-        Serial.print("Current RTC Time: ");
-        Serial.print(timeinfo.tm_hour);
-        Serial.print(":");
-        Serial.print(timeinfo.tm_min);
-        Serial.print(":");
-        Serial.println(timeinfo.tm_sec);
-      } else {
-        Serial.println("ERROR: Setup Failed to get local time from NTP server.");
-      }
-  } else {
-      Serial.println("\nWiFi connection failed. Continuing without WiFi...");
-  }
+        // Now, printing the time will show the correct, timezone-adjusted value.
+        char timeBuffer[30];
+        strftime(timeBuffer, sizeof(timeBuffer), "%A, %B %d %Y %H:%M:%S", &timeinfo);
+        Serial.print("Current California Time: ");
+        Serial.println(timeBuffer);
+    }
+
+} else {
+    Serial.println("\nWiFi connection failed. Continuing without WiFi...");
+}
 
   Serial.println("--- ESP32 (Arduino IDE Monitor) ---");
   Serial.println("ESP32 Temperature and Humidity Sensor Ready (SHT31-D).");
@@ -174,29 +228,57 @@ void setup() {
 
 }
 void loop() {
-  // --- Loop Function ---
-  // The loop() function runs repeatedly forever after setup() finishes.
-  // Flag to determine if a sensor reading should occur
-  bool triggerSensorRead = false;
-
-  // --- Check for Serial Console Input (from Arduino IDE Monitor) ---
-  if (Serial.available() > 0) {
-    char incomingChar = Serial.read();
-    if (incomingChar == 'r' || incomingChar == 'R') {
-      triggerSensorRead = true;
+       // --- 1. Handle IMMEDIATE Manual Triggers ---
+    if (Serial.available() > 0) {
+        char incomingChar = Serial.read(); // Read the character ONCE
+        if (incomingChar == 'r' || incomingChar == 'R') {
+            Serial.println("Manual trigger received from Serial Monitor.");
+            performSensorReadingAndPrint(); // ACT ON IT NOW
+        }
     }
-  }
-
-  // --- Check for Serial2 Console Input (from RS-232 Module / PuTTY) ---
-  // If you also want to trigger readings by typing 'r' into PuTTY:
     if (Serial2.available() > 0) {
-    char incomingChar2 = Serial2.read();
-    if (incomingChar2 == 'r' || incomingChar2 == 'R') {
-      triggerSensorRead = true;
+        char incomingChar2 = Serial2.read(); // Read the character ONCE
+        if (incomingChar2 == 'r' || incomingChar2 == 'R') {
+            Serial.println("Manual trigger received from RS-232.");
+            performSensorReadingAndPrint(); // ACT ON IT NOW
+        }
     }
-  }
 
-  // Attempt to sync time with NTP server if WiFi is connected once an hour
+    // --- 2. Handle TIMED Automatic Triggers ---
+    static unsigned long lastAutomaticCheck = 0;
+    const unsigned long automaticCheckInterval = 60000; // 1 minute
+
+    if (millis() - lastAutomaticCheck >= automaticCheckInterval) {
+        lastAutomaticCheck = millis();
+
+        // This block only runs if WiFi/Time is working.
+        if (timeSet) {
+            float temperatureF = (sht31.readTemperature() * 9 / 5) + 32;
+            
+            struct tm timeinfo;
+            getLocalTime(&timeinfo);
+            
+            bool shouldSendEmail = false;
+
+            // Condition 1: High Temperature
+            if (temperatureF > 85.0) {
+                Serial.println("High temperature detected. Triggering automatic email.");
+                shouldSendEmail = true;
+            }
+
+            // Condition 2: Scheduled Time
+            if ((timeinfo.tm_hour == 9 || timeinfo.tm_hour == 13 || timeinfo.tm_hour == 16) && timeinfo.tm_min == 0) {
+                Serial.println("Scheduled time reached. Triggering automatic email.");
+                shouldSendEmail = true;
+            }
+            
+            if (shouldSendEmail) {
+                readAndReportSensor(timeinfo);
+            }
+        }
+    }
+    // Periodic NTP sync 
+     // Attempt to sync time with NTP server if WiFi is connected once an hour
   static unsigned long lastNTPSync = 0;
   const unsigned long NTPimeout = 3600000; // 1 hour in milliseconds
   if (WiFi.status() == WL_CONNECTED && millis() - lastNTPSync > NTPimeout) {
@@ -212,77 +294,10 @@ void loop() {
       Serial.print(":");
       Serial.println(timeinfo.tm_sec);
       timeSet = true; // Set a flag to indicate time is set
-      if ((timeinfo.tm_hour == 9 || timeinfo.tm_hour == 13 || timeinfo.tm_hour == 16) && timeinfo.tm_min == 0) {
-      triggerSensorRead = true; // Trigger reading at these specific times
-      }
     }else {
       // Still waiting for NTP, will retry in 1 hour
       Serial.println("ERROR: Failed to get local time from NTP server.");
     }
     lastNTPSync = millis();
   }
-    
-  // --- Sensor Reading and Print Logic (Execute if any trigger is active) ---
-  if (triggerSensorRead) {
-    float temperatureC = sht31.readTemperature();
-    float humidity = sht31.readHumidity();
-    if (isnan(temperatureC) || isnan(humidity)) {
-      Serial.println("ERROR: Failed to read from SHT31 sensor!");
-      Serial2.println("ERROR: Failed to read from SHT31 sensor!");
-    } else {
-      float temperatureF = (temperatureC * 9 / 5) + 32;
-
-      // Output to Arduino IDE Serial Monitor
-      Serial.print("Temperature: ");
-      Serial.print(temperatureC);
-      Serial.print(" C | ");
-      Serial.print(temperatureF);
-      Serial.print(" F | Humidity: ");
-      Serial.print(humidity);
-      Serial.println(" % (IDE Triggered)"); // Indicate source of trigger for debug
-
-      // Output to RS-232 TTL to RS232 Module (PuTTY)
-      Serial2.print("Temperature: ");
-      Serial2.print(temperatureC);
-      Serial2.print(" C | ");
-      Serial2.print(temperatureF);
-      Serial2.print(" F | Humidity: ");
-      Serial2.print(humidity);
-      Serial2.println(" % (RS-232 Triggered)"); // Indicate source of trigger for debug
-
-      // send email if time is set and reading is successful
-      if(timeSet) {
-        struct tm timeinfo;
-        getLocalTime(&timeinfo);
-        readAndReportSensor(timeinfo);
-      }
-    }
-  } // End of triggered sensor reading logic
-
-  // Don't read temperature more than once per 2 minutes without a trigger
-  static unsigned long lastReadTime = 0;
-  unsigned long currentMillis = millis();
-  float temperatureC = sht31.readTemperature();
-  float humidity = sht31.readHumidity();
-  if (isnan(temperatureC) || isnan(humidity)) {
-    Serial.println("ERROR: Failed to read from SHT31 sensor!");
-    Serial2.println("ERROR: Failed to read from SHT31 sensor!");
-  } else {
-    float temperatureF = (temperatureC * 9 / 5) + 32;
-    if (currentMillis - lastReadTime >= 120000) { // 2 minutes in milliseconds
-      lastReadTime = currentMillis; // Update last read time
-      // Check if the temperature is above 85F and time is set before reading
-      if (temperatureF > 85.0 && timeSet) {
-        struct tm timeinfo;
-        getLocalTime(&timeinfo);
-        readAndReportSensor(timeinfo);
-      }
-    }
-  }
-  // Add a small delay to avoid overwhelming the Serial output
-  delay(1000); 
-} // End of loop function
-
-
-
-
+}
