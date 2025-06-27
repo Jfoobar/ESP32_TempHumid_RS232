@@ -20,7 +20,7 @@ const char *MAIL_TO = MAIL_SENDER;   // Use the same email for both sender and r
 const char *MAIL_SUBJECT = "SHT31-D Sensor Readings";
 const char *MAIL_CONTENT = "Temperature and Humidity Readings from SHT31-D Sensor";
 const char *MAIL_USER = MAIL_SENDER; // Use the environment variable for the user emai
-const char *MAIL_PASS = "c...hange_me"; // Use the environment variable for the app password
+const char *MAIL_PASS = ""; // Use the environment variable for the app password
 const int MAIL_PORT = 587; // SMTP port for Gmail TLS
 const bool MAIL_USE_TLS = true;
 bool timeSet = false;
@@ -30,6 +30,7 @@ int lastEmailHour = -1; // Initialize to an invalid hour
 SMTPSession smtp;
 /* Declare the global SMTP_Message object for email sending */
 SMTP_Message message;
+Session_Config config;
 bool smtpReady = false;
 char emailContentBuffer[256];
 // Create an instance of the SHT31-D sensor object
@@ -42,43 +43,83 @@ const int Serial2_TX_Pin = 17;
 const int Serial2_RX_Pin = 16;
 const long BAUD_RATE = 9600; // Match this to your PuTTY setting
 
-// This new function will handle sending any email content we give it.
-void sendSensorEmail(const char* emailBody) {
-    // First, check if SMTP is even connected.
-    if (!smtpReady) {
-        Serial.println("Cannot send email: SMTP not ready.");
-        Serial2.println("Cannot send email: SMTP not ready.");
-        // Here you could add logic to try and reconnect if you want.
-        return;
+bool syncTime() {
+    Serial.println("Starting time synchronization...");
+    
+    // 1. Configure the ESP32 to use the correct time zone and NTP servers.
+    //    The timeZoneInfo string is critical for getting local time, not just UTC.
+    configTzTime(timeZoneInfo, "pool.ntp.org", "time.nist.gov");
+
+    // 2. Wait for the time to be synced.
+    struct tm timeinfo;
+    
+    // getLocalTime() needs to be called to trigger the sync.
+    // We check the return value and the year to confirm sync.
+    // tm_year is years since 1900.
+    if (!getLocalTime(&timeinfo, 10000)) { // Give it up to 10 seconds to get an initial response
+        Serial.println("Failed to get initial time response.");
+        return false;
     }
-    Serial.println("Preparing a new email message...");
-    Serial2.println("Preparing a new email message...");
-    // 1. CLEAR the global message object to ensure a clean slate.
+
+    // Loop until the year is valid, indicating a successful sync.
+    int retry_count = 0;
+    const int max_retries = 10;
+    while (timeinfo.tm_year < (2023 - 1900) && retry_count < max_retries) {
+        Serial.printf("Waiting for NTP sync... (Attempt %d/%d)\n", retry_count + 1, max_retries);
+        delay(2000); // Wait 2 seconds between checks
+        if (!getLocalTime(&timeinfo)) {
+            Serial.println("Failed to get time on retry.");
+        }
+        retry_count++;
+    }
+
+    // 3. Check the final result.
+    if (timeinfo.tm_year < (2023 - 1900)) {
+        Serial.println("ERROR: Could not synchronize time with NTP server after multiple attempts.");
+        return false;
+    }
+
+    // SUCCESS!
+    Serial.println("\nSUCCESS: NTP has synced.");
+    char timeBuffer[50];
+    strftime(timeBuffer, sizeof(timeBuffer), "%A, %B %d %Y %H:%M:%S %Z", &timeinfo);
+    Serial.printf("Current California Time: %s\n", timeBuffer);
+    
+    return true;
+}
+
+void sendSensorEmail(const char* emailBody) {
+    if (!smtp.isLoggedIn()) {
+        Serial.println("SMTP session is not active. Attempting to reconnect...");
+        smtp.closeSession(); 
+        
+        // Reconnect using the already-known GLOBAL config.
+        if (smtp.connect(&config)) {
+            Serial.println("SUCCESS: SMTP reconnected.");
+        } else {
+            Serial.println("ERROR: SMTP reconnect failed. Aborting send. Last Error: " + smtp.errorReason());
+            return;
+        }
+    }
+
     message.clear();
 
-    // 2. DEFINE the message headers every time. This is robust.
+    // 2. build the headers.
     message.sender.name = "ESD Petaluma CA";
     message.sender.email = MAIL_FROM;
     message.subject = MAIL_SUBJECT;
     message.addRecipient("ESD Petaluma CA", MAIL_TO);
-
-    // 3. SET the dynamic email body and encoding properties.
     message.text.content = emailBody;
-    
-    // Using UTF-8 is generally more robust than us-ascii.
-    // The library handles transfer encoding well by default, but you can be explicit.
-    message.text.charSet = "utf-8";
-    message.text.transfer_encoding = Content_Transfer_Encoding::enc_7bit;
 
-    // 4. SEND the email.
-    Serial.println("Sending email...");
-    Serial2.println("Sending email...");
-    if (!MailClient.sendMail(&smtp, &message)) {
-        Serial.println("ERROR: Failed to send email.");
-        smtpReady = false; // Mark connection as stale, so we try to reconnect next time.
+    // 3. Send the email.
+   Serial.println("Sending email...");
+    if (!MailClient.sendMail(&smtp, &message, true)) {
+        Serial.println("ERROR: Failed to send email. Last Error: ");
+        Serial2.println("ERROR: Failed to send email. Last Error: ");
+        Serial.println(smtp.errorReason());
+        Serial2.println(smtp.errorReason());
     } else {
         Serial.println("Email sent successfully!");
-        Serial2.println("Email sent successfully!");
     }
 }
 
@@ -87,6 +128,7 @@ void readAndReportSensor(const struct tm &timeinfo)
     if (!smtpReady)
     {
         Serial.println("Skipping email: SMTP server is not connected.");
+        Serial2.println("Skipping email: SMTP server is not connected.");
         return; // Exit the function immediately
     }
     float temperatureC = sht31.readTemperature();
@@ -154,10 +196,7 @@ void setup()
 {
     // --- Setup Function ---
     // The setup() function runs once when you press reset or power the board.
-    struct tm timeinfo = {0};
-    time_t epochTime = mktime(&timeinfo);
-    struct timeval tv = {.tv_sec = epochTime};
-    settimeofday(&tv, NULL);
+ 
 
     // Initialize Serial (UART0) for communication with the Arduino IDE Serial Monitor
     Serial.begin(BAUD_RATE); // Using the same baud rate for consistency
@@ -177,16 +216,7 @@ void setup()
      * Debug port can be changed via ESP_MAIL_DEFAULT_DEBUG_PORT in ESP_Mail_FS.h
      */
     smtp.debug(1);
-    /* Declare the Session_Config for user defined session credentials */
-    Session_Config config;
-
-    /* Set the session config */
-    config.server.host_name = MAIL_SERVER;
-    config.server.port = MAIL_PORT;
-    config.secure.startTLS = MAIL_USE_TLS;
-    config.login.email = MAIL_FROM;
-    config.login.password = MAIL_PASS;
-    config.login.user_domain = "";
+    Serial.print("Connecting to WiFi");
 
     while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < wifiTimeout)
     {
@@ -202,46 +232,35 @@ void setup()
         Serial.print("IP address: ");
         Serial.println(WiFi.localIP());
 
-        // 2. NOW, GET THE TIME. THIS MUST HAPPEN BEFORE SMTP CONNECT.
-        Serial.println("Configuring time from NTP server...");
-        configTzTime(timeZoneInfo, "pool.ntp.org", "time.nist.gov", "time.google.com");
-        struct tm timeinfo;
-        unsigned long startSync = millis();
-        while (timeinfo.tm_year < (2023 - 1900))
-        {
-            Serial.print(".");
-            if (millis() - startSync > 15000)
-            {
-                Serial.println("\nERROR: Timeout waiting for NTP sync.");
-                timeSet = false; // Set our flag to false
-                break;
-            }
-            // getLocalTIme() populates the timeinfo struct with the current time
-            getLocalTime(&timeinfo, 100);
-            Serial.print("** Waiting for NTP sync... **");
-            delay(400);
-            timeSet = true; // Set our flag to true if we get here
-        }
-
-        // If we got the time, set the timeSet flag
-        if (timeSet)
-        { // timeSet should be set to true if the loop completed successfully
-            Serial.println("\nSUCCESS: NTP has synced.");
-            char timeBuffer[50];
-            strftime(timeBuffer, sizeof(timeBuffer), "%A, %B %d %Y %H:%M:%S %Z", &timeinfo);
-            Serial.printf("Current California Time: %s\n", timeBuffer);
-        }
+        timeSet = syncTime(); // Attempt to sync time with NTP server
 
         // 3. ONLY NOW, ATTEMPT TO CONNECT TO SMTP
         //    (This requires time to be set correctly)
         Serial.println("Connecting to SMTP Server...");
         smtp.debug(1); // Enable debug
-        Session_Config config;
-        // ... fill in your config details ...
+        if (timeSet) {
+        Serial.println("Populating global SMTP configuration...");
+        // NO "Session_Config config;" HERE. We are using the global one.
         config.server.host_name = MAIL_SERVER;
         config.server.port = MAIL_PORT;
         config.login.email = MAIL_FROM;
         config.login.password = MAIL_PASS;
+        config.login.user_domain = ""; // For Gmail
+        
+        // Now, connect using the global config object.
+        // The smtp object will store a reference to this persistent object.
+        Serial.println("Connecting to SMTP Server...");
+        if (smtp.connect(&config)) {
+            Serial.println("SUCCESS: Connected to SMTP Server.");
+            smtpReady = true;
+        } else {
+            Serial.println("ERROR: Failed to connect. Last Error: " + smtp.errorReason());
+            smtpReady = false;
+        }
+    } else {
+        Serial.println("Skipping SMTP connection: time is not set.");
+        smtpReady = false;
+    }
 
         if (!smtp.connect(&config))
         {
