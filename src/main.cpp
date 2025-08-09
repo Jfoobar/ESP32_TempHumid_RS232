@@ -1,47 +1,118 @@
 // --- Library Includes ---
 // Wire.h is for I2C communication, required by the SHT31-D sensor.
 #include <Wire.h>
-// Adafruit_Sensor.h is a foundational library for many Adafruit sensors.
 #include <Adafruit_Sensor.h>
-// Adafruit_SHT31.h is the specific library for the SHT31-D sensor.
 #include <Adafruit_SHT31.h>
-
 #include <WiFi.h>
 #include <time.h>
+
+// For WiFiManager
+#include <WiFiManager.h>
+#include <ArduinoJson.h>
+#include <FS.h>
+#include <LittleFS.h>
+// For SMTP Email Sending
 #include <ESP_Mail_Client.h>
 
-// --- Variable Declarations ---
-const char *ssid = WIFI_SSID;
-const char *password = WIFI_PASSWORD;
-const char *timeZoneInfo = "PST8PDT,M3.2.0,M11.1.0"; // Time zone for California (PDT)
-const char *MAIL_SERVER = "smtp.gmail.com";
-const char *MAIL_FROM = MAIL_SENDER; // Use the environment variable for the sender email
-const char *MAIL_TO = "#@vtext.com";
-const char *MAIL_SUBJECT = "TX Site SHT31-D Sensor Readings";
-const char *MAIL_CONTENT = "Temperature and Humidity Readings from SHT31-D Sensor";
-const char *MAIL_USER = MAIL_SENDER; // Use the environment variable for the user emai
-const char *MAIL_PASS = "pw";
-const int MAIL_PORT = 587; // SMTP port for Gmail TLS
-const bool MAIL_USE_TLS = true;
-bool timeSet = false;
-int lastEmailHour = -1; // Initialize to an invalid hour
+// --- Pin for Reset Trigger ---
+// To reset, connect this pin to GND and then power on/reset the ESP32.
+#define RESET_PIN 23
 
-/* Declare the global used SMTPSession object for SMTP transport */
-SMTPSession smtp;
-/* Declare the global SMTP_Message object for email sending */
-SMTP_Message message;
-Session_Config config;
+// --- Variable Declarations ---
+const char *MAIL_CONTENT = "Temperature and Humidity Readings from SHT31-D Sensor";
+// --- Configuration Variables ---
+// We use char arrays to store settings that can be changed.
+char timeZoneInfo[50] = "PST8PDT,M3.2.0,M11.1.0";
+char mail_server[50] = "smtp.gmail.com";
+char mail_port[6] = "587";
+char mail_from[50] = "your_email@gmail.com";
+char mail_pass[50] = "your_app_password";
+char mail_to[50] = "your_email@gmail.com";
+char mail_subject[50] = "TX Site SHT31-D Sensor Readings";
+char mail_name[50] = "ESD Petaluma, CA";
+
+// --- Global Application Variables ---
+bool timeSet = false;
+int lastEmailHour = -1;
 bool smtpReady = false;
 char emailContentBuffer[256];
-// Create an instance of the SHT31-D sensor object
-Adafruit_SHT31 sht31 = Adafruit_SHT31();
 
+// --- Global Objects ---
+SMTPSession smtp;
+SMTP_Message message;
+Session_Config config;
+Adafruit_SHT31 sht31 = Adafruit_SHT31();
 // Define pins for Serial2 (UART2) for the RS-232 TTL to RS232 Module
 // IMPORTANT: Ensure these pins are not otherwise used and are safe to use for UART.
 // GPIO 17 (TX2) and GPIO 16 (RX2) are common choices for UART2.
 const int Serial2_TX_Pin = 17;
 const int Serial2_RX_Pin = 16;
 const long BAUD_RATE = 9600; // Match this to your PuTTY setting
+
+// Flag to indicate that settings were changed and we should restart
+bool shouldSaveConfig = false;
+// Callback function that gets called when WiFiManager saves its configuration
+void saveConfigCallback() {
+  Serial.println("Should save config");
+  shouldSaveConfig = true;
+}
+void saveConfiguration() {
+  Serial.println("Saving configuration...");
+  DynamicJsonDocument json(1024);
+  json["timeZoneInfo"] = timeZoneInfo;
+  json["mail_server"] = mail_server;
+  json["mail_port"] = mail_port;
+  json["mail_from"] = mail_from;
+  json["mail_pass"] = mail_pass;
+  json["mail_to"] = mail_to;
+  json["mail_subject"] = mail_subject;
+  json["mail_name"] = mail_name;
+
+  File configFile = LittleFS.open("/config.json", "w");
+  if (!configFile) {
+    Serial.println("Failed to open config file for writing");
+    return;
+  }
+
+  serializeJson(json, configFile);
+  configFile.close();
+  Serial.println("Configuration saved.");
+}
+
+// Loads the custom configuration from a file on LittleFS
+void loadConfiguration() {
+  if (LittleFS.begin(true, "/littlefs", 5, "spiffs")) {
+    Serial.println("Mounted LittleFS on 'spiffs' partition.");
+    if (LittleFS.exists("/config.json")) {
+      Serial.println("Reading config file...");
+      File configFile = LittleFS.open("/config.json", "r");
+      if (configFile) {
+        DynamicJsonDocument json(1024);
+        DeserializationError error = deserializeJson(json, configFile);
+        if (error) {
+          Serial.println("Failed to parse config file, using default configuration");
+        } else {
+          Serial.println("Successfully parsed config file");
+          // Load values from JSON, using default if a key is missing
+          strcpy(timeZoneInfo, json["timeZoneInfo"] | "PST8PDT,M3.2.0,M11.1.0");
+          strcpy(mail_server, json["mail_server"] | "smtp.gmail.com");
+          strcpy(mail_port, json["mail_port"] | "587");
+          strcpy(mail_from, json["mail_from"] | "your_email@gmail.com");
+          strcpy(mail_pass, json["mail_pass"] | "your_app_password");
+          strcpy(mail_to, json["mail_to"] | "your_email@gmail.com");
+          strcpy(mail_subject, json["mail_subject"] | "TX Site SHT31-D Sensor Readings");
+          strcpy(mail_name, json["mail_name"] | "ESD Petaluma, CA");
+        }
+        configFile.close();
+      }
+    } else {
+        Serial.println("Config file not found, using default configuration and creating file.");
+        saveConfiguration(); // Create the file with default values
+    }
+  } else {
+    Serial.println("Failed to mount file system");
+  }
+}
 
 bool syncTime()
 {
@@ -162,10 +233,10 @@ void sendSensorEmail(const char *emailBody)
     message.clear();
 
     // 2. build the headers.
-    message.sender.name = "ESD Petaluma CA";
-    message.sender.email = MAIL_FROM;
-    message.subject = MAIL_SUBJECT;
-    message.addRecipient("ESD Petaluma CA", MAIL_TO);
+    message.sender.name = mail_name;
+    message.sender.email = mail_from;
+    message.subject = mail_subject;
+    message.addRecipient("", mail_to);
     message.text.content = emailBody;
 
     // 3. Send the email.
@@ -258,16 +329,82 @@ void performSensorReadingAndPrint()
 
 void setup()
 {
-    // --- Setup Function ---
-    // The setup() function runs once when you press reset or power the board.
+   Serial.begin(BAUD_RATE); 
+   Serial.println("\n\nBooting...");
 
-    // Initialize Serial (UART0) for communication with the Arduino IDE Serial Monitor
-    Serial.begin(BAUD_RATE); // Using the same baud rate for consistency
-    delay(1000);             // Small delay to allow serial port to initialize
-    WiFi.begin(ssid, password);
+    // --- Check for Factory Reset Trigger ---
+    pinMode(RESET_PIN, INPUT_PULLUP);
+    // Hold the reset pin to GND during boot to trigger this.
+    if (digitalRead(RESET_PIN) == LOW) {
+        Serial.println("Reset pin activated! Clearing all settings...");
+        LittleFS.begin(true, "/littlefs", 5, "spiffs");
+        LittleFS.format(); // Erase the entire filesystem
+        WiFiManager wm;
+        wm.resetSettings(); // Erase saved WiFi credentials
+        Serial.println("Settings cleared. Please restart the device.");
+        while(1) delay(1000); // Halt execution
+    }
 
-    unsigned long startAttemptTime = millis();
-    const unsigned long wifiTimeout = 15000; // 15 seconds
+    // --- Load Custom Configuration ---
+    loadConfiguration();
+
+    // --- Configure and Start WiFiManager ---
+    WiFiManager wm;
+    
+    // Set a callback that will be called when settings are saved.
+    wm.setSaveConfigCallback(saveConfigCallback);
+
+    // Add custom parameters to the WiFiManager portal
+    WiFiManagerParameter custom_tz("tz", "Time Zone String", timeZoneInfo, 48);
+    WiFiManagerParameter custom_mail_server("server", "SMTP Server", mail_server, 48);
+    WiFiManagerParameter custom_mail_port("port", "SMTP Port", mail_port, 5);
+    WiFiManagerParameter custom_mail_from("from", "Mail From Address", mail_from, 48);
+    WiFiManagerParameter custom_mail_pass("pass", "Mail App Password", mail_pass, 48);
+    WiFiManagerParameter custom_mail_to("to", "Mail To Address", mail_to, 48);
+    WiFiManagerParameter custom_mail_subject("subject", "Mail Subject", mail_subject, 48);
+    WiFiManagerParameter custom_mail_name("name", "Mail Sender Name", mail_name, 48);
+
+    wm.addParameter(&custom_tz);
+    wm.addParameter(&custom_mail_server);
+    wm.addParameter(&custom_mail_port);
+    wm.addParameter(&custom_mail_from);
+    wm.addParameter(&custom_mail_pass);
+    wm.addParameter(&custom_mail_to);
+    wm.addParameter(&custom_mail_subject);
+    wm.addParameter(&custom_mail_name);
+
+    // autoConnect() will start an access point "AutoConnectAP" if it can't connect to saved WiFi.
+    // It is a blocking function.
+    if (!wm.autoConnect("TempSensorAP")) {
+        Serial.println("Failed to connect and hit timeout");
+        ESP.restart(); // Restart if it fails to connect
+    }
+
+        Serial.println("\nWiFi connected!");
+        Serial2.println("\nWiFi connected!");
+        Serial.print("IP address: ");
+        Serial2.print("IP address: ");
+        Serial.println(WiFi.localIP());
+        Serial2.println(WiFi.localIP());
+
+    // --- Handle saving custom parameters if they were changed ---
+    if (shouldSaveConfig) {
+        // Read the new values from the WiFiManager parameters
+        strcpy(timeZoneInfo, custom_tz.getValue());
+        strcpy(mail_server, custom_mail_server.getValue());
+        strcpy(mail_port, custom_mail_port.getValue());
+        strcpy(mail_from, custom_mail_from.getValue());
+        strcpy(mail_pass, custom_mail_pass.getValue());
+        strcpy(mail_to, custom_mail_to.getValue());
+        strcpy(mail_subject, custom_mail_subject.getValue());
+        strcpy(mail_name, custom_mail_name.getValue());
+        
+        // Save these new values to our config file and restart
+        saveConfiguration();
+        Serial.println("New settings saved. Restarting device to apply changes.");
+        delay(2000);
+        ESP.restart();
+    }
 
     // Set the network reconnection option
     MailClient.networkReconnect(true);
@@ -282,25 +419,11 @@ void setup()
     // Initialize Serial2 (UART2) for communication with the RS-232 TTL to RS232 Module
     // Format: Serial2.begin(baudrate, SERIAL_8N1, TX_pin, RX_pin);
     Serial2.begin(BAUD_RATE, SERIAL_8N1, Serial2_TX_Pin, Serial2_RX_Pin);
-    Serial.print("Connecting to WiFi");
-    Serial2.print("Connecting to WiFi");
-
-    while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < wifiTimeout)
-    {
-        delay(500);
-        Serial.print(".");
-    }
 
     // Inside setup(), after WiFi is connected...
 
     if (WiFi.status() == WL_CONNECTED)
     {
-        Serial.println("\nWiFi connected!");
-        Serial2.println("\nWiFi connected!");
-        Serial.print("IP address: ");
-        Serial2.print("IP address: ");
-        Serial.println(WiFi.localIP());
-        Serial2.println(WiFi.localIP());
 
         timeSet = syncTime(); // Attempt to sync time with NTP server
 
@@ -313,11 +436,11 @@ void setup()
         {
             Serial.println("Populating global SMTP configuration...");
             // NO "Session_Config config;" HERE. We are using the global one.
-            config.server.host_name = MAIL_SERVER;
-            config.server.port = MAIL_PORT;
-            config.login.email = MAIL_FROM;
-            config.login.password = MAIL_PASS;
-            config.login.user_domain = ""; // For Gmail
+            config.server.host_name = mail_server;
+            config.server.port = atoi(mail_port);
+            config.login.email = mail_from;
+            config.login.password = mail_pass;
+            config.login.user_domain = ""; // Blank For Gmail
 
             // Now, connect using the global config object.
             // The smtp object will store a reference to this persistent object.
@@ -373,10 +496,10 @@ void setup()
     }
     Serial.println("SHT31-D sensor found and initialized!"); // Output to IDE Monitor
     // Set the message headers
-    message.sender.name = "ESD Petaluma CA";
-    message.sender.email = MAIL_FROM;
-    message.subject = MAIL_SUBJECT;
-    message.addRecipient("ESD Petaluma CA", MAIL_TO); // Add recipient
+    message.sender.name = mail_name;
+    message.sender.email = mail_from;
+    message.subject = mail_subject;
+    message.addRecipient("", mail_to); // Add recipient
     message.text.content = MAIL_CONTENT;
     message.text.charSet = "us-ascii"; // Set character set for email content
     message.text.transfer_encoding = Content_Transfer_Encoding::enc_7bit;
@@ -422,7 +545,7 @@ void loop()
             bool shouldSendEmail = false;
 
             // Condition 1: High Temperature
-            if (temperatureF > 85.0)
+            if (temperatureF > 82.0)
             {
                 Serial.println("High temperature detected. Triggering automatic email.");
                 Serial2.println("High temperature detected. Triggering automatic email.");
@@ -474,10 +597,10 @@ void loop()
                     Serial2.println("[System Check] Time acquired. Now attempting SMTP connect.");
 
                     // Populate the global config (it was skipped in setup)
-                    config.server.host_name = MAIL_SERVER;
-                    config.server.port = MAIL_PORT;
-                    config.login.email = MAIL_FROM;
-                    config.login.password = MAIL_PASS;
+                    config.server.host_name = mail_server;
+                    config.server.port = atoi(mail_port);
+                    config.login.email = mail_from;
+                    config.login.password = mail_pass;
                     config.login.user_domain = "";
 
                     if (smtp.connect(&config))
