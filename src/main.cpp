@@ -28,8 +28,8 @@ char mail_port[6] = "587";
 char mail_from[50] = "your_email@gmail.com";
 char mail_pass[50] = "your_app_password";
 char mail_to[50] = "your_email@gmail.com";
-char mail_subject[50] = "TX Site SHT31-D Sensor Readings";
-char mail_name[50] = "ESD Petaluma, CA";
+char mail_subject[50] = "SHT31-D Sensor Readings";
+char mail_name[50] = "Name of Sender";
 
 // --- Global Application Variables ---
 bool timeSet = false;
@@ -100,8 +100,8 @@ void loadConfiguration() {
           strcpy(mail_from, json["mail_from"] | "your_email@gmail.com");
           strcpy(mail_pass, json["mail_pass"] | "your_app_password");
           strcpy(mail_to, json["mail_to"] | "your_email@gmail.com");
-          strcpy(mail_subject, json["mail_subject"] | "TX Site SHT31-D Sensor Readings");
-          strcpy(mail_name, json["mail_name"] | "ESD Petaluma, CA");
+          strcpy(mail_subject, json["mail_subject"] | "SHT31-D Sensor Readings");
+          strcpy(mail_name, json["mail_name"] | "Name of Sender");
         }
         configFile.close();
       }
